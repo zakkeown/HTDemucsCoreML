@@ -20,4 +20,4 @@ Golden output files for validating HTDemucs CoreML conversion.
 python scripts/generate_test_fixtures.py
 ```
 
-Note: Requires ~2GB disk space and 5-10 minutes to run.
+Note: Requires ~100MB disk space and 5-10 minutes to run.

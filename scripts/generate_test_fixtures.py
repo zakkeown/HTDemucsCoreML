@@ -2,7 +2,6 @@
 """Generate test fixtures for HTDemucs CoreML validation."""
 
 import torch
-import torchaudio
 import numpy as np
 from pathlib import Path
 from demucs.pretrained import get_model
@@ -14,13 +13,22 @@ def generate_fixtures():
     fixture_dir.mkdir(exist_ok=True)
 
     print("Loading htdemucs_6s model...")
-    model = get_model('htdemucs_6s')
-    model.eval()
+    try:
+        model = get_model('htdemucs_6s')
+        model.eval()
+    except Exception as e:
+        print(f"Error loading model: {e}")
+        print("Make sure you have an internet connection for the first run.")
+        print("The model will be downloaded to ~/.cache/torch/hub/")
+        raise
 
     # Generate test audio: 10-second stereo at 44.1kHz
     sample_rate = 44100
     duration = 10.0
     num_samples = int(sample_rate * duration)
+
+    # Set random seed for reproducible fixtures
+    torch.manual_seed(42)
 
     # Create diverse test signals
     test_cases = {
