@@ -27,9 +27,9 @@ public class AudioFFT {
         }
         self.fftSetup = setup
 
-        // Pre-compute Hann window
+        // Pre-compute Hann window (denormalized for proper COLA)
         self.window = [Float](repeating: 0, count: fftSize)
-        vDSP_hann_window(&window, vDSP_Length(fftSize), Int32(vDSP_HANN_NORM))
+        vDSP_hann_window(&window, vDSP_Length(fftSize), 0)
 
         // Allocate working buffers
         let halfSize = fftSize / 2
@@ -94,8 +94,38 @@ public class AudioFFT {
             throw AudioFFTError.mismatchedDimensions
         }
 
-        // TODO: Implement iSTFT logic
-        return []
+        let numFrames = real.count
+        guard numFrames > 0 else {
+            return []
+        }
+
+        let outputLength = (numFrames - 1) * hopLength + fftSize
+
+        var output = [Float](repeating: 0, count: outputLength)
+        var windowSum = [Float](repeating: 0, count: outputLength)
+
+        // Reconstruct with overlap-add
+        for (frameIdx, (frameReal, frameImag)) in zip(real, imag).enumerated() {
+            // Inverse FFT
+            var timeFrame = performInverseRealFFT(frameReal, frameImag)
+
+            // Apply window
+            vDSP_vmul(timeFrame, 1, window, 1, &timeFrame, 1, vDSP_Length(fftSize))
+
+            // Overlap-add
+            let start = frameIdx * hopLength
+            for i in 0..<fftSize {
+                output[start + i] += timeFrame[i]
+                windowSum[start + i] += window[i] * window[i]
+            }
+        }
+
+        // Normalize by window sum (COLA compliance)
+        for i in 0..<outputLength where windowSum[i] > 1e-8 {
+            output[i] /= windowSum[i]
+        }
+
+        return output
     }
 
     // MARK: - Private Helpers
@@ -135,11 +165,6 @@ public class AudioFFT {
                     log2n,
                     FFTDirection(FFT_FORWARD)
                 )
-
-                // Scale output (vDSP doesn't scale forward transform)
-                var scale = Float(0.5)
-                vDSP_vsmul(realPtr.baseAddress!, 1, &scale, realPtr.baseAddress!, 1, vDSP_Length(halfSize))
-                vDSP_vsmul(imagPtr.baseAddress!, 1, &scale, imagPtr.baseAddress!, 1, vDSP_Length(halfSize))
             }
         }
 
@@ -162,6 +187,60 @@ public class AudioFFT {
         imagOutput[halfSize] = 0
 
         return (realOutput, imagOutput)
+    }
+
+    private func performInverseRealFFT(_ real: [Float], _ imag: [Float]) -> [Float] {
+        let halfSize = fftSize / 2
+
+        // Pack DC and Nyquist into split complex format
+        // DC → splitComplexReal[0], Nyquist → splitComplexImag[0]
+        splitComplexReal[0] = real[0]
+        splitComplexImag[0] = real[halfSize]
+
+        // Pack positive frequencies
+        for i in 1..<halfSize {
+            splitComplexReal[i] = real[i]
+            splitComplexImag[i] = imag[i]
+        }
+
+        // Use withUnsafeMutableBufferPointer for proper pointer lifetime
+        var output = [Float](repeating: 0, count: fftSize)
+
+        splitComplexReal.withUnsafeMutableBufferPointer { realPtr in
+            splitComplexImag.withUnsafeMutableBufferPointer { imagPtr in
+                var splitComplex = DSPSplitComplex(
+                    realp: realPtr.baseAddress!,
+                    imagp: imagPtr.baseAddress!
+                )
+
+                // Perform inverse FFT
+                vDSP_fft_zrip(
+                    fftSetup,
+                    &splitComplex,
+                    1,
+                    log2n,
+                    FFTDirection(FFT_INVERSE)
+                )
+
+                // Convert split complex back to real
+                output.withUnsafeMutableBytes { outputPtr in
+                    let outputFloat = outputPtr.bindMemory(to: Float.self)
+                    vDSP_ztoc(
+                        &splitComplex,
+                        1,
+                        UnsafeMutablePointer<DSPComplex>(OpaquePointer(outputFloat.baseAddress!)),
+                        2,
+                        vDSP_Length(halfSize)
+                    )
+                }
+            }
+        }
+
+        // Scale output (vDSP requires manual scaling for inverse)
+        var scale = Float(1.0) / Float(2.0 * Float(fftSize))
+        vDSP_vsmul(output, 1, &scale, &output, 1, vDSP_Length(fftSize))
+
+        return output
     }
 }
 
