@@ -18,16 +18,21 @@ public class ChunkProcessor {
     /// - Parameters:
     ///   - audio: Input audio samples
     ///   - processor: Function to process each chunk
+    ///   - progressCallback: Optional callback for chunk progress (chunkIndex, totalChunks)
     /// - Returns: Processed audio with seamless blending
     public func processInChunks(
         audio: [Float],
-        processor: ([Float]) throws -> [Float]
+        processor: ([Float]) throws -> [Float],
+        progressCallback: ((Int, Int) -> Void)? = nil
     ) rethrows -> [Float] {
         guard audio.count > 0 else { return [] }
 
         // If audio shorter than chunk size, process directly
         if audio.count <= chunkSamples {
-            return try processor(audio)
+            progressCallback?(0, 1)
+            let result = try processor(audio)
+            progressCallback?(1, 1)
+            return result
         }
 
         var output = [Float](repeating: 0, count: audio.count)
@@ -36,6 +41,9 @@ public class ChunkProcessor {
         let numChunks = (audio.count - overlapSamples * 2 + hopSamples - 1) / hopSamples
 
         for chunkIdx in 0..<numChunks {
+            // Report progress before processing
+            progressCallback?(chunkIdx, numChunks)
+
             let start = chunkIdx * hopSamples
             let end = min(start + chunkSamples, audio.count)
 
@@ -62,6 +70,9 @@ public class ChunkProcessor {
                 }
             }
         }
+
+        // Report completion
+        progressCallback?(numChunks, numChunks)
 
         // Normalize by accumulated weights
         for i in 0..<audio.count where weights[i] > 0 {

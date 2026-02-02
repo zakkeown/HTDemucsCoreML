@@ -40,10 +40,15 @@ public class SeparationPipeline: @unchecked Sendable {
     }
 
     /// Separate stereo audio into 6 stems
-    /// - Parameter stereoAudio: [leftChannel, rightChannel]
+    /// - Parameters:
+    ///   - stereoAudio: [leftChannel, rightChannel]
+    ///   - progressCallback: Optional callback for chunk progress (chunkIndex, totalChunks)
     /// - Returns: Dictionary of [StemType: [left, right]]
     /// - Throws: PipelineError if separation fails
-    public func separate(stereoAudio: [[Float]]) throws -> [StemType: [[Float]]] {
+    public func separate(
+        stereoAudio: [[Float]],
+        progressCallback: ((Int, Int) -> Void)? = nil
+    ) throws -> [StemType: [[Float]]] {
         guard stereoAudio.count == 2 else {
             throw PipelineError.invalidChannelCount(stereoAudio.count)
         }

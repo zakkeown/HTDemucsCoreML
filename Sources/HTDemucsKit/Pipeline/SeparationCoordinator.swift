@@ -55,11 +55,32 @@ public class SeparationCoordinator: @unchecked Sendable {
                     }
 
                     // Step 3: Run separation pipeline
-                    continuation.yield(.processing(chunk: 0, total: 1))
+                    // Calculate expected number of chunks (based on ChunkProcessor config)
+                    let chunkDuration: Float = 10.0  // seconds
+                    let overlapDuration: Float = 1.0  // seconds per side
+                    let sampleRate = Int(decoded.sampleRate)
+                    let chunkSamples = Int(chunkDuration * Float(sampleRate))
+                    let overlapSamples = Int(overlapDuration * Float(sampleRate))
+                    let hopSamples = chunkSamples - 2 * overlapSamples
+                    let audioLength = decoded.leftChannel.count
 
-                    let stems = try pipeline.separate(stereoAudio: decoded.stereoArray)
+                    let numChunks: Int
+                    if audioLength <= chunkSamples {
+                        numChunks = 1
+                    } else {
+                        numChunks = (audioLength - overlapSamples * 2 + hopSamples - 1) / hopSamples
+                    }
 
-                    continuation.yield(.processing(chunk: 1, total: 1))
+                    continuation.yield(.processing(chunk: 0, total: numChunks))
+
+                    let stems = try pipeline.separate(
+                        stereoAudio: decoded.stereoArray,
+                        progressCallback: { chunkIdx, total in
+                            continuation.yield(.processing(chunk: chunkIdx, total: total))
+                        }
+                    )
+
+                    continuation.yield(.processing(chunk: numChunks, total: numChunks))
 
                     // Step 4: Encode stems
                     var outputPaths: [StemType: URL] = [:]
