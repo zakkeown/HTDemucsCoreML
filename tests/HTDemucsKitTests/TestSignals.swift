@@ -16,4 +16,11 @@ enum TestSignals {
     static func silence(samples: Int) -> [Float] {
         return [Float](repeating: 0, count: samples)
     }
+
+    /// Generate white noise
+    static func whiteNoise(samples: Int) -> [Float] {
+        return (0..<samples).map { _ in
+            Float.random(in: -1.0...1.0)
+        }
+    }
 }

@@ -11,7 +11,10 @@ public class AudioFFT {
 
     // MARK: - vDSP State
     private var fftSetup: FFTSetup
-    private var window: [Float]
+    private var _window: [Float]
+
+    /// Access to the Hann window for testing
+    public var window: [Float] { _window }
 
     // MARK: - Working Buffers
     private var splitComplexReal: [Float]
@@ -28,8 +31,8 @@ public class AudioFFT {
         self.fftSetup = setup
 
         // Pre-compute Hann window (denormalized for proper COLA)
-        self.window = [Float](repeating: 0, count: fftSize)
-        vDSP_hann_window(&window, vDSP_Length(fftSize), 0)
+        self._window = [Float](repeating: 0, count: fftSize)
+        vDSP_hann_window(&_window, vDSP_Length(fftSize), 0)
 
         // Allocate working buffers
         let halfSize = fftSize / 2
@@ -72,7 +75,7 @@ public class AudioFFT {
             let frame = Array(audio[start..<end])
 
             // Apply window
-            vDSP_vmul(frame, 1, window, 1, &windowedFrame, 1, vDSP_Length(fftSize))
+            vDSP_vmul(frame, 1, _window, 1, &windowedFrame, 1, vDSP_Length(fftSize))
 
             // Perform FFT
             let (frameReal, frameImag) = performRealFFT(windowedFrame)
@@ -110,13 +113,13 @@ public class AudioFFT {
             var timeFrame = performInverseRealFFT(frameReal, frameImag)
 
             // Apply window
-            vDSP_vmul(timeFrame, 1, window, 1, &timeFrame, 1, vDSP_Length(fftSize))
+            vDSP_vmul(timeFrame, 1, _window, 1, &timeFrame, 1, vDSP_Length(fftSize))
 
             // Overlap-add
             let start = frameIdx * hopLength
             for i in 0..<fftSize {
                 output[start + i] += timeFrame[i]
-                windowSum[start + i] += window[i] * window[i]
+                windowSum[start + i] += _window[i] * _window[i]
             }
         }
 
