@@ -57,8 +57,31 @@ public class AudioFFT {
             throw AudioFFTError.invalidAudioData("NaN or Inf values")
         }
 
-        // TODO: Implement STFT logic
-        return (real: [], imag: [])
+        // Compute number of frames
+        let numFrames = (audio.count - fftSize) / hopLength + 1
+
+        var realOutput: [[Float]] = []
+        var imagOutput: [[Float]] = []
+
+        // Process each frame
+        for frameIdx in 0..<numFrames {
+            let start = frameIdx * hopLength
+            let end = start + fftSize
+
+            // Extract frame
+            let frame = Array(audio[start..<end])
+
+            // Apply window
+            vDSP_vmul(frame, 1, window, 1, &windowedFrame, 1, vDSP_Length(fftSize))
+
+            // Perform FFT
+            let (frameReal, frameImag) = performRealFFT(windowedFrame)
+
+            realOutput.append(frameReal)
+            imagOutput.append(frameImag)
+        }
+
+        return (real: realOutput, imag: imagOutput)
     }
 
     /// Compute inverse Short-Time Fourier Transform
@@ -73,6 +96,72 @@ public class AudioFFT {
 
         // TODO: Implement iSTFT logic
         return []
+    }
+
+    // MARK: - Private Helpers
+
+    private func performRealFFT(_ input: [Float]) -> ([Float], [Float]) {
+        let halfSize = fftSize / 2
+        let numBins = halfSize + 1
+
+        // Convert to interleaved format for vDSP
+        let interleaved = input
+
+        // Use withUnsafeMutableBufferPointer for proper pointer lifetime
+        splitComplexReal.withUnsafeMutableBufferPointer { realPtr in
+            splitComplexImag.withUnsafeMutableBufferPointer { imagPtr in
+                var splitComplex = DSPSplitComplex(
+                    realp: realPtr.baseAddress!,
+                    imagp: imagPtr.baseAddress!
+                )
+
+                // Convert real input to split complex
+                interleaved.withUnsafeBytes { inputPtr in
+                    let inputFloat = inputPtr.bindMemory(to: Float.self)
+                    vDSP_ctoz(
+                        UnsafePointer<DSPComplex>(OpaquePointer(inputFloat.baseAddress!)),
+                        2,
+                        &splitComplex,
+                        1,
+                        vDSP_Length(halfSize)
+                    )
+                }
+
+                // Perform forward FFT
+                vDSP_fft_zrip(
+                    fftSetup,
+                    &splitComplex,
+                    1,
+                    log2n,
+                    FFTDirection(FFT_FORWARD)
+                )
+
+                // Scale output (vDSP doesn't scale forward transform)
+                var scale = Float(0.5)
+                vDSP_vsmul(realPtr.baseAddress!, 1, &scale, realPtr.baseAddress!, 1, vDSP_Length(halfSize))
+                vDSP_vsmul(imagPtr.baseAddress!, 1, &scale, imagPtr.baseAddress!, 1, vDSP_Length(halfSize))
+            }
+        }
+
+        // Extract bins (DC and Nyquist packed in splitComplexReal[0], splitComplexImag[0])
+        var realOutput = [Float](repeating: 0, count: numBins)
+        var imagOutput = [Float](repeating: 0, count: numBins)
+
+        // DC bin (purely real)
+        realOutput[0] = splitComplexReal[0]
+        imagOutput[0] = 0
+
+        // Positive frequencies
+        for i in 1..<halfSize {
+            realOutput[i] = splitComplexReal[i]
+            imagOutput[i] = splitComplexImag[i]
+        }
+
+        // Nyquist bin (purely real, packed in imaginary DC)
+        realOutput[halfSize] = splitComplexImag[0]
+        imagOutput[halfSize] = 0
+
+        return (realOutput, imagOutput)
     }
 }
 

@@ -21,4 +21,22 @@ final class AudioFFTTests: XCTestCase {
             }
         }
     }
+
+    func testRealFFTOutputShape() throws {
+        let fft = try AudioFFT()
+
+        // Single frame worth of audio
+        let audio = TestSignals.sine(frequency: 440, duration: 0.1, sampleRate: 44100)
+
+        let (real, imag) = try fft.stft(audio)
+
+        // Should have frames
+        XCTAssertGreaterThan(real.count, 0)
+        XCTAssertEqual(real.count, imag.count)
+
+        // Each frame should have fftSize/2 + 1 bins (real FFT)
+        if let firstFrame = real.first {
+            XCTAssertEqual(firstFrame.count, 2049) // 4096/2 + 1
+        }
+    }
 }
