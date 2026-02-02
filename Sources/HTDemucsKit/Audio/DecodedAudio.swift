@@ -25,3 +25,12 @@ public struct DecodedAudio {
         [leftChannel, rightChannel]
     }
 }
+
+/// Supported audio output formats
+public enum AudioFormat: String {
+    case wav
+    case mp3
+    case flac
+
+    public var fileExtension: String { rawValue }
+}
