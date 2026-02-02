@@ -6,6 +6,7 @@ while other operations can be quantized to FP16 for model size reduction.
 """
 
 import torch
+import torch.nn as nn
 from typing import Callable, Optional
 
 
@@ -58,3 +59,43 @@ def create_precision_selector() -> Callable[[str], Optional[torch.dtype]]:
             return torch.float16
 
     return selector
+
+
+def trace_inner_model(inner_model: nn.Module) -> torch.jit.ScriptModule:
+    """Trace an InnerHTDemucs model to create a TorchScript module.
+
+    TorchScript tracing converts a PyTorch model into a ScriptModule that can be
+    executed independently without Python. This is essential for CoreML conversion
+    as it provides a static computational graph.
+
+    The function disables fast attention to ensure tracing compatibility and uses
+    example inputs matching the expected spectrogram format (batch=1, channels=2,
+    freq_bins=2049, time_frames=431).
+
+    Args:
+        inner_model: An InnerHTDemucs model or compatible nn.Module that accepts
+            spectrograms in Complex-as-Channels format.
+
+    Returns:
+        A torch.jit.ScriptModule that can run inference without Python.
+
+    Example:
+        >>> from htdemucs_coreml.model_surgery import extract_inner_model
+        >>> from demucs.pretrained import get_model
+        >>> model = get_model('htdemucs_6s')
+        >>> inner_model = extract_inner_model(model.models[0])
+        >>> traced_model = trace_inner_model(inner_model)
+        >>> # The traced model can now be converted to CoreML
+    """
+    # Disable fast attention for compatibility
+    torch.backends.mha.set_fastpath_enabled(False)
+
+    # Create example inputs with the expected spectrogram shape
+    # (batch, channels=2, freq_bins=2049, time_frames=431)
+    example_input = torch.randn(1, 2, 2049, 431)
+
+    # Trace the model using the example input
+    # torch.jit.trace records the operations executed during the forward pass
+    traced_model = torch.jit.trace(inner_model, example_input)
+
+    return traced_model

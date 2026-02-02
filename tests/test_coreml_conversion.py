@@ -161,3 +161,69 @@ class TestPrecisionSelector:
                 assert (
                     result == expected_precision
                 ), f"Operation '{op_name}' returned {result}, expected {expected_precision}"
+
+
+class TestModelTracing:
+    """Tests for TorchScript tracing of InnerHTDemucs model."""
+
+    def test_trace_inner_model_returns_scriptmodule(self):
+        """Verify that trace_inner_model returns a torch.jit.ScriptModule.
+
+        TorchScript tracing converts a PyTorch model into a ScriptModule that
+        can be executed independently without Python, which is essential for
+        CoreML conversion.
+        """
+        from htdemucs_coreml.coreml_converter import trace_inner_model
+        from htdemucs_coreml.model_surgery import InnerHTDemucs
+        import torch.nn as nn
+
+        # Create a simple mock inner model
+        class MockInnerHTDemucs(nn.Module):
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                return x * 2.0
+
+        inner_model = MockInnerHTDemucs()
+        traced_model = trace_inner_model(inner_model)
+
+        # Verify the returned model is a ScriptModule
+        assert isinstance(
+            traced_model, torch.jit.ScriptModule
+        ), f"Expected torch.jit.ScriptModule, got {type(traced_model)}"
+
+    def test_traced_model_runs_inference(self):
+        """Verify that the traced model can run inference with correct output.
+
+        The traced model should accept inputs with the expected shape
+        (1, 2, 2049, 431) and produce valid outputs.
+        """
+        from htdemucs_coreml.coreml_converter import trace_inner_model
+        import torch.nn as nn
+
+        # Create a simple mock inner model that mimics InnerHTDemucs behavior
+        class MockInnerHTDemucs(nn.Module):
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                # Simulate the model's output shape transformation
+                batch, channels, freq, time = x.shape
+                # Return output with sources dimension: (batch, sources, channels, freq, time)
+                sources = 6
+                return torch.ones(batch, sources, channels, freq, time)
+
+        inner_model = MockInnerHTDemucs()
+        traced_model = trace_inner_model(inner_model)
+
+        # Create example input with the expected shape
+        example_input = torch.randn(1, 2, 2049, 431)
+
+        # Run inference with the traced model
+        with torch.no_grad():
+            output = traced_model(example_input)
+
+        # Verify output has the correct shape
+        assert output.shape == (1, 6, 2, 2049, 431), (
+            f"Expected output shape (1, 6, 2, 2049, 431), got {output.shape}"
+        )
+
+        # Verify output is a tensor
+        assert isinstance(output, torch.Tensor), (
+            f"Expected torch.Tensor output, got {type(output)}"
+        )
