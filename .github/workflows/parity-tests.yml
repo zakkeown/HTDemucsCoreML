@@ -1,0 +1,50 @@
+name: Parity Tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  parity:
+    runs-on: macos-latest
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install Python dependencies
+      run: |
+        cd tests/parity
+        pip install -r requirements.txt
+
+    - name: Build Swift package
+      run: swift build -c release
+
+    - name: Generate test fixtures
+      run: python tests/parity/fixtures/generate_fixtures.py
+
+    - name: Run parity tests
+      run: |
+        cd tests/parity
+        source venv/bin/activate
+        pytest test_parity.py -v
+
+    - name: Generate report
+      if: always()
+      run: |
+        cd tests/parity
+        source venv/bin/activate
+        python generate_report.py
+
+    - name: Upload results
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: parity-results
+        path: tests/parity/outputs/
