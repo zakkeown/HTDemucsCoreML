@@ -72,8 +72,17 @@ final class PyTorchParityTests: XCTestCase {
     }
 
     private func loadGoldenFixture(path: String) throws -> ([Float], [[Float]], [[Float]]) {
-        // Note: This requires Python NumPy loading, which isn't available in pure Swift
-        // For now, we'll throw an error and implement this when we add NumPy bridge
-        throw XCTSkip("NumPy loading not yet implemented - requires Python bridge")
+        // Extract fixture name from path (e.g., "Resources/GoldenOutputs/silence.npz" -> "silence")
+        let components = path.split(separator: "/")
+        guard let filename = components.last else {
+            throw NSError(
+                domain: "PyTorchParityTests",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Invalid path: \(path)"]
+            )
+        }
+
+        let fixtureName = filename.replacingOccurrences(of: ".npz", with: "")
+        return try TestSignals.loadNPZFixture(name: fixtureName)
     }
 }
