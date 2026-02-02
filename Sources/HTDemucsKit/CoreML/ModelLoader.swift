@@ -42,6 +42,7 @@ public class ModelLoader {
 public enum ModelError: Error, LocalizedError {
     case modelNotFound(String)
     case loadFailed(String)
+    case incompatibleVersion(model: String, required: String)
 
     public var errorDescription: String? {
         switch self {
@@ -49,6 +50,8 @@ public enum ModelError: Error, LocalizedError {
             return "Model not found at path: \(path)"
         case .loadFailed(let reason):
             return "Failed to load model: \(reason)"
+        case .incompatibleVersion(let model, let required):
+            return "Model '\(model)' is incompatible (required: \(required))"
         }
     }
 }
