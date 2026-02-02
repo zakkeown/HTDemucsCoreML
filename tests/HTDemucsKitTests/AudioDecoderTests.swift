@@ -65,11 +65,3 @@ struct AudioDecoderTests {
         return fixturePath
     }
 }
-
-// Custom error for skipping tests
-struct SkipTest: Error {
-    let message: String
-    init(_ message: String) {
-        self.message = message
-    }
-}
