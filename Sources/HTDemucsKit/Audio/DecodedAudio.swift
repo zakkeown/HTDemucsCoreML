@@ -27,7 +27,7 @@ public struct DecodedAudio {
 }
 
 /// Supported audio output formats
-public enum AudioFormat: String {
+public enum AudioFormat: String, Sendable {
     case wav
     case mp3
     case flac

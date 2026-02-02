@@ -2,7 +2,7 @@ import Foundation
 import SwiftFFmpeg
 
 /// Encodes PCM float audio data to various output formats using FFmpeg
-public class AudioEncoder {
+public class AudioEncoder: @unchecked Sendable {
     public init() {}
 
     /// Encode PCM float audio to a file

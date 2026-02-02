@@ -12,12 +12,21 @@ public enum StemType: String, CaseIterable, Sendable {
 }
 
 /// Complete audio source separation pipeline
-public class SeparationPipeline {
+public class SeparationPipeline: @unchecked Sendable {
     private let fft: AudioFFT
     private let inference: InferenceEngine
     private let chunker: ChunkProcessor
 
     /// Initialize pipeline with CoreML model
+    /// - Parameter model: Loaded MLModel instance
+    /// - Throws: Error if initialization fails
+    public init(model: MLModel) throws {
+        self.fft = try AudioFFT()
+        self.inference = InferenceEngine(model: model)
+        self.chunker = ChunkProcessor()
+    }
+
+    /// Initialize pipeline with model path
     /// - Parameter modelPath: Path to .mlpackage file
     /// - Throws: Error if model loading fails
     public init(modelPath: String) throws {
@@ -66,6 +75,7 @@ public enum PipelineError: Error, LocalizedError {
     case invalidChannelCount(Int)
     case channelLengthMismatch
     case emptyAudio
+    case invalidSampleRate(got: Double, expected: Double)
     case notImplemented(String)
 
     public var errorDescription: String? {
@@ -76,6 +86,8 @@ public enum PipelineError: Error, LocalizedError {
             return "Left and right channels have different lengths"
         case .emptyAudio:
             return "Audio cannot be empty"
+        case .invalidSampleRate(let got, let expected):
+            return "Invalid sample rate: got \(got) Hz, expected \(expected) Hz"
         case .notImplemented(let msg):
             return "Not implemented: \(msg)"
         }

@@ -2,7 +2,7 @@ import Foundation
 import SwiftFFmpeg
 
 /// Decodes audio files to PCM float format using FFmpeg
-public class AudioDecoder {
+public class AudioDecoder: @unchecked Sendable {
     public init() {}
 
     /// Decode an audio file to PCM float format
