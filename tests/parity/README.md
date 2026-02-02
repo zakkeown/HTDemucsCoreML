@@ -2,6 +2,14 @@
 
 ## Setup
 
+### 1. Build the CLI (from project root)
+
+```bash
+swift build -c release --product htdemucs-cli
+```
+
+### 2. Install Python dependencies
+
 ```bash
 cd tests/parity
 python3 -m venv venv
@@ -12,11 +20,14 @@ pip install -r requirements.txt
 ## Running Tests
 
 ```bash
+# Activate venv first (if not already active)
+source venv/bin/activate
+
 # Run parity tests
 pytest test_parity.py -v
 
-# Generate comparison report
-python compare_models.py --input ../fixtures/test_audio.wav
+# Generate HTML report with visualizations
+python generate_report.py outputs
 ```
 
 ## Metrics
