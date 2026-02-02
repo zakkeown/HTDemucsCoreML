@@ -38,10 +38,26 @@ public class ModelLoader {
         let config = MLModelConfiguration()
         config.computeUnits = .cpuAndGPU
 
+        // Compile the model if it's a .mlpackage
+        let compiledURL: URL
+        if modelURL.pathExtension == "mlpackage" {
+            do {
+                compiledURL = try MLModel.compileModel(at: modelURL)
+            } catch {
+                throw ModelError.loadFailed("Failed to compile model: \(error.localizedDescription)")
+            }
+        } else {
+            compiledURL = modelURL
+        }
+
         // Load model
-        let loadedModel = try MLModel(contentsOf: modelURL, configuration: config)
-        self.model = loadedModel
-        return loadedModel
+        do {
+            let loadedModel = try MLModel(contentsOf: compiledURL, configuration: config)
+            self.model = loadedModel
+            return loadedModel
+        } catch {
+            throw ModelError.loadFailed("Failed to load compiled model: \(error.localizedDescription)")
+        }
     }
 
     // MARK: - Private Helpers
