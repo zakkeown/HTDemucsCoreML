@@ -42,7 +42,7 @@ struct HTDemucsCLI {
         }
 
         let inputPath = args[0]
-        let outputPath = args.count >= 4 ? args[3] : "output.npz"
+        let _ = args.count >= 4 ? args[3] : "output.npz"
 
         print("Computing STFT for: \(inputPath)")
         print("Note: NPZ export not yet implemented")
@@ -56,25 +56,35 @@ struct HTDemucsCLI {
     static func runSeparate(args: [String]) async throws {
         // Parse arguments
         var inputPath: String?
-        var modelPath: String?
         var outputDir: String = "stems"
+        var format: AudioFormat = .wav
 
         var i = 0
         while i < args.count {
             switch args[i] {
-            case "--model":
-                if i + 1 < args.count {
-                    modelPath = args[i + 1]
-                    i += 2
-                } else {
-                    throw CLIError.missingValue("--model")
-                }
             case "--output":
                 if i + 1 < args.count {
                     outputDir = args[i + 1]
                     i += 2
                 } else {
                     throw CLIError.missingValue("--output")
+                }
+            case "--format":
+                if i + 1 < args.count {
+                    let formatStr = args[i + 1].lowercased()
+                    switch formatStr {
+                    case "wav":
+                        format = .wav
+                    case "mp3":
+                        format = .mp3
+                    case "flac":
+                        format = .flac
+                    default:
+                        throw CLIError.invalidFormat(formatStr)
+                    }
+                    i += 2
+                } else {
+                    throw CLIError.missingValue("--format")
                 }
             default:
                 if inputPath == nil {
@@ -88,36 +98,100 @@ struct HTDemucsCLI {
             throw CLIError.missingArgument("input file")
         }
 
-        guard let model = modelPath else {
-            throw CLIError.missingArgument("--model <path>")
+        // Verify input file exists
+        guard FileManager.default.fileExists(atPath: input) else {
+            throw CLIError.invalidPath(input)
         }
 
         print("HTDemucs Audio Separation")
-        print("Input: \(input)")
-        print("Model: \(model)")
-        print("Output: \(outputDir)")
+        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        print("Input:  \(input)")
+        print("Output: \(outputDir)/")
+        print("Format: \(format.rawValue)")
+        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         print()
 
-        // Create output directory
-        try FileManager.default.createDirectory(
-            atPath: outputDir,
-            withIntermediateDirectories: true
+        // Initialize coordinator (uses default htdemucs_6s model)
+        print("Loading model...")
+        let coordinator = try SeparationCoordinator()
+        print("✓ Model loaded: htdemucs_6s")
+        print()
+
+        // Run separation with progress tracking
+        let inputURL = URL(fileURLWithPath: input)
+        let outputURL = URL(fileURLWithPath: outputDir)
+
+        let progressStream = coordinator.separate(
+            input: inputURL,
+            outputDir: outputURL,
+            format: format
         )
 
-        // Initialize pipeline
-        print("Loading model...")
-        let pipeline = try SeparationPipeline(modelPath: model)
-        print("✓ Model loaded")
+        // Track progress state
+        var currentLine = ""
 
-        // Note: Actual audio I/O requires AVFoundation integration
-        print()
-        print("Note: Audio file I/O not yet implemented")
-        print("This requires AVFoundation integration")
-        print()
-        print("Pipeline ready! Would process:")
-        print("  1. Load WAV from: \(input)")
-        print("  2. Separate into 6 stems")
-        print("  3. Save stems to: \(outputDir)/")
+        for await event in progressStream {
+            switch event {
+            case .decoding(let progress):
+                clearCurrentLine()
+                currentLine = String(format: "Decoding audio... %3.0f%%", progress * 100)
+                print(currentLine, terminator: "")
+                fflush(stdout)
+
+            case .processing(let chunk, let total):
+                clearCurrentLine()
+                let progressBar = makeProgressBar(current: chunk, total: total)
+                currentLine = "Processing: \(progressBar) \(chunk)/\(total) chunks"
+                print(currentLine, terminator: "")
+                fflush(stdout)
+
+            case .encoding(let stem, let progress):
+                clearCurrentLine()
+                let progressBar = makeProgressBar(progress: progress)
+                currentLine = "Encoding \(stem.rawValue)... \(progressBar)"
+                print(currentLine, terminator: "")
+                fflush(stdout)
+
+            case .complete(let outputPaths):
+                clearCurrentLine()
+                print("✓ Separation complete!")
+                print()
+                print("Generated stems:")
+                for stemType in StemType.allCases.sorted(by: { $0.rawValue < $1.rawValue }) {
+                    if let path = outputPaths[stemType] {
+                        print("  ✓ \(stemType.rawValue.padding(toLength: 7, withPad: " ", startingAt: 0)) → \(path.path)")
+                    }
+                }
+                print()
+
+            case .failed(let error):
+                clearCurrentLine()
+                print("✗ Separation failed: \(error.localizedDescription)")
+                throw error
+            }
+        }
+    }
+
+    // MARK: - Progress Display Helpers
+
+    static func clearCurrentLine() {
+        print("\r\u{001B}[K", terminator: "")
+        fflush(stdout)
+    }
+
+    static func makeProgressBar(current: Int, total: Int) -> String {
+        let progress = total > 0 ? Float(current) / Float(total) : 0.0
+        return makeProgressBar(progress: progress)
+    }
+
+    static func makeProgressBar(progress: Float) -> String {
+        let barWidth = 20
+        let filled = Int(progress * Float(barWidth))
+        let empty = barWidth - filled
+        let percent = Int(progress * 100)
+
+        let bar = String(repeating: "█", count: filled) + String(repeating: "░", count: empty)
+        return "[\(bar)] \(String(format: "%3d%%", percent))"
     }
 
     static func runValidate() throws {
@@ -138,8 +212,8 @@ struct HTDemucsCLI {
     }
 
     static func printVersion() {
-        print("HTDemucs CLI v0.1.0")
-        print("Phase 2B: Swift STFT/iSTFT + CoreML Integration")
+        print("HTDemucs CLI v0.3.0")
+        print("Phase 3: Complete Audio I/O Pipeline")
     }
 
     static func printUsage() {
@@ -147,11 +221,14 @@ struct HTDemucsCLI {
         HTDemucs CLI - Audio Source Separation
 
         Commands:
+          separate <input> [--output <dir>] [--format <format>]
+              Separate audio into 6 stems (drums, bass, vocals, other, piano, guitar)
+              Options:
+                --output <dir>      Output directory (default: stems/)
+                --format <format>   Output format: wav, mp3, flac (default: wav)
+
           stft <input.wav> --output <stft.npz>
               Compute STFT for PyTorch validation
-
-          separate <input.wav> --model <model.mlpackage> --output <dir/>
-              Separate audio into 6 stems (drums, bass, vocals, other, piano, guitar)
 
           validate
               Display test suite information
@@ -160,7 +237,8 @@ struct HTDemucsCLI {
               Show version information
 
         Examples:
-          htdemucs-cli separate song.wav --model htdemucs.mlpackage --output stems/
+          htdemucs-cli separate song.wav --output my_stems/
+          htdemucs-cli separate song.mp3 --output stems/ --format flac
           htdemucs-cli stft song.wav --output stft.npz
           htdemucs-cli validate
         """)
@@ -173,6 +251,7 @@ enum CLIError: Error, LocalizedError {
     case missingArgument(String)
     case missingValue(String)
     case invalidPath(String)
+    case invalidFormat(String)
 
     var errorDescription: String? {
         switch self {
@@ -182,6 +261,8 @@ enum CLIError: Error, LocalizedError {
             return "Missing value for flag: \(flag)"
         case .invalidPath(let path):
             return "Invalid path: \(path)"
+        case .invalidFormat(let format):
+            return "Invalid format: \(format). Supported formats: wav, mp3, flac"
         }
     }
 }
