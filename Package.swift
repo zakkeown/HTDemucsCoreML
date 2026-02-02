@@ -17,10 +17,15 @@ let package = Package(
             targets: ["htdemucs-cli"]
         )
     ],
+    dependencies: [
+        .package(url: "https://github.com/sunlubo/SwiftFFmpeg.git", branch: "master")
+    ],
     targets: [
         .target(
             name: "HTDemucsKit",
-            dependencies: []
+            dependencies: [
+                .product(name: "SwiftFFmpeg", package: "SwiftFFmpeg")
+            ]
         ),
         .executableTarget(
             name: "htdemucs-cli",

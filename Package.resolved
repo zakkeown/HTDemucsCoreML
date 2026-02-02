@@ -1,0 +1,15 @@
+{
+  "originHash" : "9a55f90c8e517b02b4d746ade929bacc35c020452cf524bd6cbc7bb5369512ba",
+  "pins" : [
+    {
+      "identity" : "swiftffmpeg",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/sunlubo/SwiftFFmpeg.git",
+      "state" : {
+        "branch" : "master",
+        "revision" : "38d3da7f51df372b1e47a7d42cdcff3c5ddff301"
+      }
+    }
+  ],
+  "version" : 3
+}
