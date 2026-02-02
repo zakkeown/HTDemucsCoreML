@@ -12,7 +12,7 @@ in native code (Swift using Accelerate framework).
 
 import torch
 import torch.nn as nn
-from typing import Tuple
+from typing import Tuple, Optional
 
 
 class InnerHTDemucs(nn.Module):
@@ -164,3 +164,87 @@ def extract_inner_model(htdemucs: nn.Module) -> InnerHTDemucs:
         >>> # Output: masks (batch=1, sources=6, freq=2049, time=431)
     """
     return InnerHTDemucs(htdemucs)
+
+
+def capture_stft_output(htdemucs_model: nn.Module, audio: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Capture intermediate STFT output from HTDemucs forward pass using hooks.
+
+    This function intercepts the complex spectrogram output from the HTDemucs STFT
+    operation (_spec method) and separates it into real and imaginary components.
+
+    The STFT is computed with:
+    - FFT size (nfft): 4096
+    - Hop length: 1024
+    - Number of frequency bins: 2049 (nfft // 2 + 1)
+
+    Args:
+        htdemucs_model: The HTDemucs model (can be BagOfModels wrapper or HTDemucs directly).
+            If BagOfModels, extracts the first model internally.
+        audio: Input audio tensor with shape (batch, channels, samples).
+            Expected to be stereo (channels=2) for HTDemucs.
+
+    Returns:
+        Tuple of (real_part, imag_part) where:
+        - real_part: Tensor of shape (batch, channels, freq_bins=2049, time_frames)
+        - imag_part: Tensor of shape (batch, channels, freq_bins=2049, time_frames)
+
+    Example:
+        >>> from demucs.pretrained import get_model
+        >>> model = get_model('htdemucs_6s')
+        >>> audio = torch.randn(1, 2, 44100)  # 1 second at 44.1kHz
+        >>> real, imag = capture_stft_output(model, audio)
+        >>> print(real.shape)  # torch.Size([1, 2, 2049, time_frames])
+    """
+    # Handle both BagOfModels wrapper and raw HTDemucs
+    if hasattr(htdemucs_model, 'models'):
+        # This is a BagOfModels wrapper, get the first model
+        actual_model = htdemucs_model.models[0]
+    else:
+        # This is already an HTDemucs model
+        actual_model = htdemucs_model
+
+    # Container to capture the spectrogram
+    captured_spectrogram: Optional[torch.Tensor] = None
+
+    def capture_hook(module, input, output):
+        """Hook to capture the STFT output."""
+        nonlocal captured_spectrogram
+        # output from _spec is the complex spectrogram with shape (batch, channels, freq, time)
+        captured_spectrogram = output
+
+    # Register hook on the _spec method
+    # We need to hook the method itself, not the module
+    # Instead, we'll hook the torch.stft operation indirectly by examining the forward pass
+    # Actually, we need to hook when _spec returns its result
+    # Let's use a simpler approach: monkey-patch the _spec method temporarily
+
+    original_spec = actual_model._spec
+
+    def hooked_spec(x):
+        """Wrapper around _spec that captures its output."""
+        nonlocal captured_spectrogram
+        z = original_spec(x)
+        captured_spectrogram = z
+        return z
+
+    # Temporarily replace _spec with our hooked version
+    actual_model._spec = hooked_spec
+
+    try:
+        with torch.no_grad():
+            # Run the forward pass to trigger the STFT
+            _ = actual_model(audio)
+    finally:
+        # Restore the original _spec method
+        actual_model._spec = original_spec
+
+    # Extract real and imaginary parts from the complex spectrogram
+    if captured_spectrogram is None:
+        raise RuntimeError("Failed to capture STFT output")
+
+    # Convert complex tensor to real and imaginary components
+    # captured_spectrogram shape: (batch, channels, freq_bins, time_frames)
+    real_part = captured_spectrogram.real
+    imag_part = captured_spectrogram.imag
+
+    return real_part, imag_part
