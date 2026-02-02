@@ -11,6 +11,7 @@ from typing import Callable, Optional
 import numpy as np
 from pathlib import Path
 import coremltools
+from coremltools import ComputeUnit
 
 
 # Operations that require FP32 precision for numerical stability
@@ -152,9 +153,9 @@ def convert_to_coreml(
     """
     # Validate output path
     output_path = Path(output_path)
-    if output_path.suffix != ".mlmodel":
+    if output_path.suffix not in [".mlmodel", ".mlpackage"]:
         raise ValueError(
-            f"Output path must end with .mlmodel, got {output_path.suffix}"
+            f"Output path must end with .mlmodel or .mlpackage, got {output_path.suffix}"
         )
 
     # Ensure parent directory exists
@@ -175,12 +176,20 @@ def convert_to_coreml(
             dtype=np.float32,
         )
 
+        # Map string compute_units to enum
+        compute_units_map = {
+            "ALL": ComputeUnit.ALL,
+            "CPU_ONLY": ComputeUnit.CPU_ONLY,
+            "CPU_AND_NE": ComputeUnit.CPU_AND_NE,
+        }
+        compute_unit_enum = compute_units_map.get(compute_units, ComputeUnit.ALL)
+
         # Convert the traced model to CoreML
         # The traced model will be automatically analyzed for input/output shapes
         coreml_model = coremltools.converters.convert(
             traced_model,
             inputs=[input_tensor],
-            compute_units=compute_units,
+            compute_units=compute_unit_enum,
             minimum_deployment_target=coremltools.target.iOS18,
         )
 
