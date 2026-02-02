@@ -1,27 +1,33 @@
-import XCTest
+import Testing
+import Foundation
 @testable import HTDemucsKit
 
-final class AudioErrorsTests: XCTestCase {
+@Suite("AudioError Tests")
+struct AudioErrorsTests {
+    @Test("File not found error description")
     func testFileNotFoundErrorDescription() {
         let error = AudioError.fileNotFound(path: "/test/file.mp3")
-        XCTAssertTrue(error.localizedDescription.contains("/test/file.mp3"))
+        #expect(error.localizedDescription.contains("/test/file.mp3"))
     }
 
+    @Test("Unsupported format error description")
     func testUnsupportedFormatErrorDescription() {
         let error = AudioError.unsupportedFormat(format: "DRM-MP3", reason: "DRM protected")
-        XCTAssertTrue(error.localizedDescription.contains("DRM-MP3"))
-        XCTAssertTrue(error.localizedDescription.contains("DRM protected"))
+        #expect(error.localizedDescription.contains("DRM-MP3"))
+        #expect(error.localizedDescription.contains("DRM protected"))
     }
 
+    @Test("Decode failed error description")
     func testDecodeFailedErrorDescription() {
         let underlying = NSError(domain: "test", code: 1, userInfo: nil)
         let error = AudioError.decodeFailed(underlyingError: underlying)
-        XCTAssertTrue(error.localizedDescription.contains("decode"))
+        #expect(error.localizedDescription.contains("decode"))
     }
 
+    @Test("Encode failed error description")
     func testEncodeFailedErrorDescription() {
         let error = AudioError.encodeFailed(stem: .drums, reason: "disk full")
-        XCTAssertTrue(error.localizedDescription.contains("drums"))
-        XCTAssertTrue(error.localizedDescription.contains("disk full"))
+        #expect(error.localizedDescription.contains("drums"))
+        #expect(error.localizedDescription.contains("disk full"))
     }
 }
