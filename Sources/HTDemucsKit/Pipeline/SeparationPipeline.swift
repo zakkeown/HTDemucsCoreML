@@ -2,7 +2,7 @@ import CoreML
 import Foundation
 
 /// Stem types for audio separation
-public enum StemType: String, CaseIterable {
+public enum StemType: String, CaseIterable, Sendable {
     case drums
     case bass
     case vocals
