@@ -40,14 +40,19 @@ env/
 # macOS
 .DS_Store
 
-# CoreML models
+# CoreML models (except the one in Resources)
 *.mlpackage/
 *.mlmodel
+!Resources/Models/*.mlpackage/
 
-# Test fixtures
+# Test fixtures and outputs
 test_fixtures/*.npy
 test_fixtures/*.wav
 test_fixtures/*.mp3
+tests/parity/outputs/
+*.wav
+*.mp3
+*.flac
 
 # Jupyter
 .ipynb_checkpoints/
@@ -56,3 +61,6 @@ test_fixtures/*.mp3
 # Swift Package Manager
 .build/
 .swiftpm/
+
+# Test venv
+tests/parity/venv/

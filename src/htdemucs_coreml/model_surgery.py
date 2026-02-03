@@ -1,13 +1,18 @@
 """Model surgery for extracting CoreML-compatible neural network from HTDemucs.
 
 This module extracts the neural network portion of HTDemucs that processes
-spectrograms, removing the STFT/iSTFT operations. The extracted model accepts
-spectrograms in Complex-as-Channels format (real and imaginary parts stacked
-as separate channels) and outputs separation masks.
+both spectrograms and raw audio, enabling the full hybrid model with both
+frequency and time branches.
 
-This enables CoreML conversion since complex number operations are not supported
-by CoreML. The STFT/iSTFT operations are intended to be implemented separately
-in native code (Swift using Accelerate framework).
+HTDemucs is a hybrid model where:
+    final_output = time_branch + istft(frequency_branch)
+
+This module provides FullHybridHTDemucs which accepts both inputs and returns
+both outputs, allowing Swift to handle STFT/iSTFT externally while CoreML
+handles both neural network branches.
+
+CoreML conversion is possible because complex number operations are handled
+externally in Swift using the Accelerate framework.
 """
 
 import torch
@@ -15,25 +20,210 @@ import torch.nn as nn
 from typing import Tuple, Optional
 
 
-class InnerHTDemucs(nn.Module):
-    """HTDemucs neural network without STFT/iSTFT operations.
+class FullHybridHTDemucs(nn.Module):
+    """Full hybrid HTDemucs with both frequency and time branches.
 
-    This module extracts the core neural network from HTDemucs that processes
-    spectrograms directly. It accepts Complex-as-Channels format input
-    (real and imaginary parts concatenated along the channel dimension) and
-    outputs separation masks for each source.
+    This module wraps HTDemucs to process both spectrograms and raw audio,
+    running the complete hybrid architecture including:
+    1. Frequency encoder on spectrogram
+    2. Time encoder on raw audio
+    3. Cross-domain transformer on both branches
+    4. Frequency decoder returning separated spectrograms
+    5. Time decoder returning separated audio
 
-    The model processes input through:
-    1. Normalization
-    2. Time and frequency branch encoders
-    3. Cross-domain transformer
-    4. Frequency and time branch decoders
-    5. Denormalization
+    The final separation is: output = time_output + istft(freq_output)
+    This addition is performed in Swift after CoreML inference.
 
     Attributes:
-        htdemucs: The original HTDemucs model to extract from.
-        mean: Mean value for normalization (set during first forward pass).
-        std: Std value for normalization (set during first forward pass).
+        htdemucs: The original HTDemucs model.
+        num_sources: Number of sources (6 for htdemucs_6s).
+        audio_channels: Number of audio channels (2 for stereo).
+    """
+
+    def __init__(
+        self,
+        htdemucs: nn.Module,
+        audio_length: Optional[int] = None,
+        freq_bins: Optional[int] = None,
+        time_frames: Optional[int] = None,
+    ):
+        """Initialize FullHybridHTDemucs by wrapping an HTDemucs model.
+
+        Args:
+            htdemucs: An HTDemucs model instance (typically loaded via
+                demucs.pretrained.get_model).
+            audio_length: Fixed audio length for CoreML compatibility. If None,
+                uses the model's training segment length (343980 samples for 7.8s).
+            freq_bins: Fixed frequency bins in output spectrogram. If None,
+                defaults to 2048 (htdemucs default).
+            time_frames: Fixed time frames in output spectrogram. If None,
+                computed from audio_length using STFT parameters.
+        """
+        super().__init__()
+        self.htdemucs = htdemucs
+        # Store constants for CoreML compatibility (avoid dynamic shape ops)
+        self.num_sources = len(htdemucs.sources)  # 6
+        self.audio_channels = htdemucs.audio_channels  # 2
+        self.cac_channels = self.audio_channels * 2  # 4 (real+imag for stereo)
+
+        # Fixed audio length for CoreML (avoids dynamic shape extraction)
+        if audio_length is None:
+            audio_length = int(htdemucs.segment * htdemucs.samplerate)
+        self.audio_length = audio_length
+
+        # Fixed frequency output dimensions (encoder/decoder preserve dimensions)
+        if freq_bins is None:
+            freq_bins = 2048  # htdemucs uses nfft=4096, so freq_bins = nfft//2
+        self.freq_bins = freq_bins
+
+        # Fixed time frames in spectrogram output
+        # NOTE: time_frames must match actual STFT output dimensions.
+        # For htdemucs with training_length=343980, the actual is 336.
+        # Best practice: compute from a sample STFT or pass explicit value.
+        if time_frames is None:
+            # Default to 336 which matches htdemucs training segment
+            time_frames = 336
+        self.time_frames = time_frames
+
+    def forward(
+        self, spectrogram: torch.Tensor, raw_audio: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Process spectrogram and raw audio through both branches.
+
+        Args:
+            spectrogram: Complex-as-Channels spectrogram with shape:
+                (batch, channels=4, freq_bins=2049, time_frames=431)
+                where channels are [real_L, imag_L, real_R, imag_R]
+            raw_audio: Raw stereo audio waveform with shape:
+                (batch, channels=2, samples=441000)
+
+        Returns:
+            Tuple of (freq_output, time_output):
+            - freq_output: Separated spectrograms with shape
+                (batch, sources=6, channels=4, freq_bins=2048, time_frames=431)
+            - time_output: Separated audio with shape
+                (batch, sources=6, channels=2, samples=441000)
+        """
+        B, C, Fq, T = spectrogram.shape
+        # Use fixed length constant for CoreML compatibility
+        length = self.audio_length
+
+        # === Normalize frequency branch (spectrogram) ===
+        mean = spectrogram.mean(dim=(1, 2, 3), keepdim=True)
+        std = spectrogram.std(dim=(1, 2, 3), keepdim=True)
+        x = (spectrogram - mean) / (1e-5 + std)
+
+        # === Normalize time branch (raw audio) ===
+        meant = raw_audio.mean(dim=(1, 2), keepdim=True)
+        stdt = raw_audio.std(dim=(1, 2), keepdim=True)
+        xt = (raw_audio - meant) / (1e-5 + stdt)
+
+        # === Encoder: process both branches ===
+        saved = []  # Skip connections for frequency branch
+        saved_t = []  # Skip connections for time branch
+        lengths = []  # Saved lengths for frequency decoder
+        lengths_t = []  # Saved lengths for time decoder
+
+        for idx, encode in enumerate(self.htdemucs.encoder):
+            lengths.append(x.shape[-1])
+            inject = None
+
+            if idx < len(self.htdemucs.tencoder):
+                # Process time branch
+                lengths_t.append(xt.shape[-1])
+                tenc = self.htdemucs.tencoder[idx]
+                xt = tenc(xt)
+
+                if not tenc.empty:
+                    # Save for skip connection
+                    saved_t.append(xt)
+                else:
+                    # First conv merges time into freq branch
+                    inject = xt
+
+            # Process frequency branch with injection from time branch
+            x = encode(x, inject)
+
+            # Add frequency embedding after first encoder layer
+            if idx == 0 and self.htdemucs.freq_emb is not None:
+                frs = torch.arange(x.shape[-2], device=x.device)
+                emb = self.htdemucs.freq_emb(frs).t()[None, :, :, None].expand_as(x)
+                x = x + self.htdemucs.freq_emb_scale * emb
+
+            saved.append(x)
+
+        # === Cross-transformer: exchange information between branches ===
+        if self.htdemucs.crosstransformer:
+            if self.htdemucs.bottom_channels:
+                from einops import rearrange
+
+                b, c, f, t = x.shape
+                x = rearrange(x, "b c f t-> b c (f t)")
+                x = self.htdemucs.channel_upsampler(x)
+                x = rearrange(x, "b c (f t)-> b c f t", f=f)
+                xt = self.htdemucs.channel_upsampler_t(xt)
+
+            x, xt = self.htdemucs.crosstransformer(x, xt)
+
+            if self.htdemucs.bottom_channels:
+                x = rearrange(x, "b c f t-> b c (f t)")
+                x = self.htdemucs.channel_downsampler(x)
+                x = rearrange(x, "b c (f t)-> b c f t", f=f)
+                xt = self.htdemucs.channel_downsampler_t(xt)
+
+        # === Decoder: process both branches ===
+        for idx, decode in enumerate(self.htdemucs.decoder):
+            skip = saved.pop(-1)
+            x, pre = decode(x, skip, lengths.pop(-1))
+
+            # Time decoder starts later (offset by depth difference)
+            offset = self.htdemucs.depth - len(self.htdemucs.tdecoder)
+            if idx >= offset:
+                tdec = self.htdemucs.tdecoder[idx - offset]
+                length_t = lengths_t.pop(-1)
+
+                if tdec.empty:
+                    # Use pre-transconv output from freq branch
+                    assert pre.shape[2] == 1, pre.shape
+                    pre = pre[:, :, 0]
+                    xt, _ = tdec(pre, None, length_t)
+                else:
+                    skip_t = saved_t.pop(-1)
+                    xt, _ = tdec(xt, skip_t, length_t)
+
+        # Verify all skip connections were used
+        assert len(saved) == 0
+        assert len(lengths_t) == 0
+        assert len(saved_t) == 0
+
+        # === Reshape and denormalize outputs ===
+        # Use stored constants for CoreML compatibility
+        S = self.num_sources  # 6
+        C_per_source = self.cac_channels  # 4
+
+        # Frequency branch output: (B, S*4, freq, time) -> (B, S, 4, freq, time)
+        # Use fixed dimensions for CoreML compatibility (no dynamic size extraction)
+        freq_output = x.view(1, S, C_per_source, self.freq_bins, self.time_frames)
+
+        # Denormalize frequency output
+        freq_output = freq_output * std[:, None] + mean[:, None]
+
+        # Time branch output: (B, S*2, length) -> (B, S, 2, length)
+        time_output = xt.view(1, S, self.audio_channels, length)
+        time_output = time_output * stdt[:, None] + meant[:, None]
+
+        return freq_output, time_output
+
+
+# Keep InnerHTDemucs for backwards compatibility
+class InnerHTDemucs(nn.Module):
+    """HTDemucs neural network without STFT/iSTFT operations (frequency branch only).
+
+    DEPRECATED: Use FullHybridHTDemucs for proper hybrid model support.
+
+    This module extracts only the frequency branch from HTDemucs, passing zeros
+    for the time branch. This results in significant quality loss since HTDemucs
+    relies on both branches.
     """
 
     def __init__(self, htdemucs: nn.Module):
@@ -139,8 +329,62 @@ class InnerHTDemucs(nn.Module):
         return x
 
 
+def extract_full_hybrid_model(
+    htdemucs: nn.Module,
+    audio_length: Optional[int] = None,
+    freq_bins: Optional[int] = None,
+    time_frames: Optional[int] = None,
+) -> FullHybridHTDemucs:
+    """Extract the full hybrid neural network from an HTDemucs model.
+
+    Wraps an HTDemucs model to create a version that accepts both spectrograms
+    and raw audio, processing both frequency and time branches. This is the
+    recommended approach for accurate source separation.
+
+    The wrapper removes STFT/iSTFT operations (handled in Swift) but preserves
+    both neural network branches for proper hybrid processing.
+
+    Args:
+        htdemucs: An HTDemucs model instance. Can be obtained via:
+            from demucs.pretrained import get_model
+            model = get_model('htdemucs_6s')
+            hybrid = extract_full_hybrid_model(model.models[0])
+        audio_length: Fixed audio length for CoreML compatibility. If None,
+            uses the model's training segment length (343980 samples for 7.8s).
+        freq_bins: Fixed frequency bins in output spectrogram. If None,
+            defaults to 2048.
+        time_frames: Fixed time frames in output spectrogram. If None,
+            computed from audio_length.
+
+    Returns:
+        FullHybridHTDemucs: A wrapped model that processes both branches.
+
+    Example:
+        >>> from demucs.pretrained import get_model
+        >>> model = get_model('htdemucs_6s')
+        >>> hybrid_model = extract_full_hybrid_model(model.models[0])
+        >>> hybrid_model.eval()
+        >>> # Inputs:
+        >>> #   spectrogram: (batch=1, channels=4, freq=2048, time=336)
+        >>> #   raw_audio: (batch=1, channels=2, samples=343980)
+        >>> # Outputs:
+        >>> #   freq_output: (batch=1, sources=6, channels=4, freq=2048, time=336)
+        >>> #   time_output: (batch=1, sources=6, channels=2, samples=343980)
+    """
+    return FullHybridHTDemucs(
+        htdemucs,
+        audio_length=audio_length,
+        freq_bins=freq_bins,
+        time_frames=time_frames,
+    )
+
+
 def extract_inner_model(htdemucs: nn.Module) -> InnerHTDemucs:
-    """Extract the inner neural network from an HTDemucs model.
+    """Extract the inner neural network from an HTDemucs model (frequency branch only).
+
+    DEPRECATED: Use extract_full_hybrid_model() for proper hybrid model support.
+    This function only extracts the frequency branch, resulting in significant
+    quality loss.
 
     Wraps an HTDemucs model to create a version that accepts spectrograms
     directly (in Complex-as-Channels format) instead of raw audio waveforms.

@@ -83,7 +83,81 @@ def test_per_stem_exists(separated_stems):
         f"Missing stems: {expected_stems - actual_stems}"
 
 @pytest.mark.slow
-def test_multiple_files():
-    """Test parity on multiple audio files."""
-    # This would test on MUSDB18 or other datasets
-    pytest.skip("Requires MUSDB18 dataset - implement when available")
+def test_musdb18_quality():
+    """Test separation quality on real music from MUSDB18-HQ."""
+    import os
+    from pathlib import Path
+
+    musdb_path = Path.home() / "Datasets" / "musdb18hq" / "test"
+
+    if not musdb_path.exists():
+        pytest.skip("MUSDB18-HQ dataset not found at ~/Datasets/musdb18hq")
+
+    # Test on first 3 songs for reasonable runtime
+    songs = sorted([d for d in musdb_path.iterdir() if d.is_dir()])[:3]
+
+    results = []
+    for song_dir in songs:
+        print(f"\n{'='*60}")
+        print(f"Testing: {song_dir.name}")
+        print('='*60)
+
+        mixture = song_dir / "mixture.wav"
+        output_dir = OUTPUT_DIR / song_dir.name
+        output_dir.mkdir(exist_ok=True)
+
+        # Run PyTorch
+        print("Running PyTorch HTDemucs...")
+        subprocess.run([
+            "python", str(Path(__file__).parent / "run_pytorch_demucs.py"),
+            str(mixture),
+            "--output", str(output_dir)
+        ], check=True)
+
+        # Run CoreML
+        print("Running CoreML HTDemucs...")
+        subprocess.run([
+            "bash", str(Path(__file__).parent / "run_coreml_demucs.sh"),
+            str(mixture),
+            str(output_dir)
+        ], check=True)
+
+        # Compute metrics for each stem
+        # MUSDB18 has 4 stems; htdemucs_6s outputs 6 (piano+guitar go to "other")
+        stems_to_test = ["drums", "bass", "vocals", "other"]
+
+        for stem in stems_to_test:
+            ground_truth = song_dir / f"{stem}.wav"
+            pytorch_output = output_dir / f"{stem}_pytorch.wav"
+            coreml_output = output_dir / f"{stem}_coreml.wav"
+
+            # We're testing CoreML vs ground truth, not CoreML vs PyTorch
+            # This measures actual separation quality
+            venv_python = Path(__file__).parent / "venv" / "bin" / "python"
+            result = subprocess.run([
+                str(venv_python), str(Path(__file__).parent / "compute_metrics.py"),
+                "--reference", str(ground_truth),
+                "--estimated", str(coreml_output),
+                "--stem", stem
+            ], capture_output=True, text=True)
+
+            # Parse SDR from output
+            for line in result.stdout.split('\n'):
+                if 'SDR=' in line:
+                    sdr = float(line.split('SDR=')[1].split()[0])
+                    results.append({
+                        'song': song_dir.name,
+                        'stem': stem,
+                        'sdr': sdr
+                    })
+                    print(f"  {stem}: SDR = {sdr:.2f} dB")
+
+    # Check that average SDR is reasonable for real separation
+    avg_sdr = sum(r['sdr'] for r in results) / len(results)
+    print(f"\n{'='*60}")
+    print(f"Average SDR across {len(results)} stems: {avg_sdr:.2f} dB")
+    print('='*60)
+
+    # For HTDemucs on MUSDB18, expect SDR > 5 dB (literature baseline)
+    assert avg_sdr > 5.0, \
+        f"Average SDR {avg_sdr:.2f} dB is below expected threshold of 5.0 dB"

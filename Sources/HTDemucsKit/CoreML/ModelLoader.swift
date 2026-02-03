@@ -34,9 +34,9 @@ public class ModelLoader {
             return cached
         }
 
-        // Configure for CPU+GPU (Phase 1 target)
+        // Configure for all compute units (including ANE for consistency with CoreML default)
         let config = MLModelConfiguration()
-        config.computeUnits = .cpuAndGPU
+        config.computeUnits = .all
 
         // Compile the model if it's a .mlpackage
         let compiledURL: URL

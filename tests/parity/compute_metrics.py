@@ -96,9 +96,24 @@ def main():
     parser.add_argument("--output-dir", default=None,
                         help="Directory with separated stems")
     parser.add_argument("--save-csv", help="Save results to CSV")
+    parser.add_argument("--reference", help="Reference audio file (ground truth)")
+    parser.add_argument("--estimated", help="Estimated audio file (model output)")
+    parser.add_argument("--stem", help="Stem name (for single file comparison)")
 
     args = parser.parse_args()
 
+    # Single file comparison mode (for MUSDB18 testing)
+    if args.reference and args.estimated:
+        ref_audio = load_stem(Path(args.reference))
+        est_audio = load_stem(Path(args.estimated))
+        metrics = compute_bss_metrics(ref_audio, est_audio)
+
+        stem_name = args.stem or "unknown"
+        print(f"{stem_name}: SDR={metrics['sdr']:.2f} dB, "
+              f"SIR={metrics['sir']:.2f} dB, SAR={metrics['sar']:.2f} dB")
+        return 0
+
+    # Directory comparison mode (CoreML vs PyTorch)
     # Default to outputs/ in script directory
     if args.output_dir is None:
         script_dir = Path(__file__).parent

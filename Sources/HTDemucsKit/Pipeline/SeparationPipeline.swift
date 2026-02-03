@@ -2,13 +2,14 @@ import CoreML
 import Foundation
 
 /// Stem types for audio separation
+/// IMPORTANT: Order MUST match PyTorch htdemucs_6s model output order!
 public enum StemType: String, CaseIterable, Sendable {
-    case drums
-    case bass
-    case vocals
-    case other
-    case piano
-    case guitar
+    case drums  // Index 0
+    case bass   // Index 1
+    case other  // Index 2 (NOT vocals!)
+    case vocals // Index 3 (NOT other!)
+    case guitar // Index 4
+    case piano  // Index 5
 }
 
 /// Complete audio source separation pipeline
@@ -115,11 +116,11 @@ public class SeparationPipeline: @unchecked Sendable {
         let audioLength = leftChannel.count
 
         // ChunkProcessor configuration
-        let chunkDuration: Float = 10.0
-        let overlapDuration: Float = 1.0
+        // CRITICAL: Must match model's native segment size (343980 samples = ~7.8s)
+        // Using larger chunks would cause dimension mismatches with model output
         let sampleRate = 44100
-        let chunkSamples = Int(chunkDuration * Float(sampleRate))
-        let overlapSamples = Int(overlapDuration * Float(sampleRate))
+        let chunkSamples = 343980  // Model's native segment size
+        let overlapSamples = Int(1.0 * Float(sampleRate))  // 1 second overlap
         let hopSamples = chunkSamples - 2 * overlapSamples
 
         // Calculate number of chunks
@@ -199,7 +200,8 @@ public class SeparationPipeline: @unchecked Sendable {
         return stemOutputs
     }
 
-    /// Process a single stereo chunk through STFT → inference → mask → iSTFT
+    /// Process a single stereo chunk through STFT → hybrid inference → iSTFT + time
+    /// Uses the full hybrid model with both frequency and time branches.
     /// - Parameters:
     ///   - leftChannel: Left channel chunk samples
     ///   - rightChannel: Right channel chunk samples
@@ -208,9 +210,22 @@ public class SeparationPipeline: @unchecked Sendable {
         leftChannel: [Float],
         rightChannel: [Float]
     ) throws -> [[[Float]]] {
-        // 1. Run STFT on both channels
-        let (leftReal, leftImag) = try fft.stft(leftChannel)
-        let (rightReal, rightImag) = try fft.stft(rightChannel)
+        // Store original chunk length for output trimming
+        let originalLength = leftChannel.count
+
+        // CRITICAL: Pad audio to segment size BEFORE STFT
+        // The model expects consistent spectrogram and audio inputs.
+        // Padding audio before STFT ensures the spectrogram represents the padded audio.
+        let segmentSize = 343980
+        let (paddedLeft, paddedRight) = padAudioToSegment(
+            left: leftChannel,
+            right: rightChannel,
+            targetLength: segmentSize
+        )
+
+        // 1. Run STFT on padded audio
+        let (leftReal, leftImag) = try fft.stft(paddedLeft)
+        let (rightReal, rightImag) = try fft.stft(paddedRight)
 
         // 2. Prepare stereo spectrogram for inference
         // STFT returns [numFrames][numBins=2049]
@@ -224,51 +239,76 @@ public class SeparationPipeline: @unchecked Sendable {
         let stereoReal = [leftRealTransposed, rightRealTransposed]
         let stereoImag = [leftImagTransposed, rightImagTransposed]
 
-        // 3. Run inference to get masks [6][2][2049][timeFrames]
-        let masks = try inference.predict(real: stereoReal, imag: stereoImag)
+        // DEBUG: Print input statistics
+        #if DEBUG
+        print("DEBUG: stereoReal[0][0] first 5 = \(stereoReal[0][0].prefix(5))")
+        print("DEBUG: stereoReal[0][1000] first 5 = \(stereoReal[0][1000].prefix(5))")
+        print("DEBUG: paddedLeft first 5 = \(paddedLeft.prefix(5))")
+        #endif
 
-        // 4. Apply masks to spectrograms and run iSTFT for each stem and channel
+        // 3. Run hybrid inference with both spectrogram and padded audio
+        // Returns separated spectrograms AND time-domain audio from both branches
+        let (freqReal, freqImag, timeOutput) = try inference.predictHybrid(
+            real: stereoReal,
+            imag: stereoImag,
+            rawAudio: [paddedLeft, paddedRight]
+        )
+
+        #if DEBUG
+        print("DEBUG: freqReal[1][0][0] first 5 = \(freqReal[1][0][0].prefix(5))")  // bass, left, bin 0
+        print("DEBUG: timeOutput[1][0] first 5 = \(timeOutput[1][0].prefix(5))")  // bass, left
+        #endif
+
+        // 4. For each stem: iSTFT(freq) + time
+        // The hybrid model output is: final = time_output + istft(freq_output)
         var stemOutputs: [[[Float]]] = []
 
         for stemIdx in 0..<6 {
-            let stemMask = masks[stemIdx]  // [2][2049][timeFrames]
+            let stemFreqReal = freqReal[stemIdx]  // [2 channels][2049 bins][timeFrames]
+            let stemFreqImag = freqImag[stemIdx]  // [2 channels][2049 bins][timeFrames]
+            let stemTimeAudio = timeOutput[stemIdx]  // [2 channels][samples]
 
             var channelOutputs: [[Float]] = []
 
             // Process left channel (0) and right channel (1)
             for channelIdx in 0..<2 {
-                let channelMask = stemMask[channelIdx]  // [2049 bins][timeFrames]
-                let realSpec = channelIdx == 0 ? leftReal : rightReal  // [numFrames][2049 bins]
-                let imagSpec = channelIdx == 0 ? leftImag : rightImag  // [numFrames][2049 bins]
+                let channelReal = stemFreqReal[channelIdx]  // [2049 bins][timeFrames]
+                let channelImag = stemFreqImag[channelIdx]  // [2049 bins][timeFrames]
 
-                // Apply mask to spectrogram (element-wise multiply)
-                // realSpec and imagSpec are [numFrames][numBins=2049]
-                // channelMask is [numBins=2049][numFrames]
-                // Need to align indices: realSpec[frameIdx][binIdx] * channelMask[binIdx][frameIdx]
-                var maskedReal: [[Float]] = []
-                var maskedImag: [[Float]] = []
+                // Transpose from [bins][frames] to [frames][bins] for iSTFT
+                let numFrames = channelReal[0].count
+                let numBins = channelReal.count
 
-                for frameIdx in 0..<realSpec.count {
-                    let realFrame = realSpec[frameIdx]
-                    let imagFrame = imagSpec[frameIdx]
+                var realTransposed: [[Float]] = []
+                var imagTransposed: [[Float]] = []
 
-                    var newRealFrame = [Float](repeating: 0, count: realFrame.count)
-                    var newImagFrame = [Float](repeating: 0, count: imagFrame.count)
+                for frameIdx in 0..<numFrames {
+                    var realFrame = [Float](repeating: 0, count: numBins)
+                    var imagFrame = [Float](repeating: 0, count: numBins)
 
-                    for binIdx in 0..<realFrame.count {
-                        // channelMask is [bins][frames], so mask[binIdx][frameIdx]
-                        let maskValue = channelMask[binIdx][frameIdx]
-                        newRealFrame[binIdx] = realFrame[binIdx] * maskValue
-                        newImagFrame[binIdx] = imagFrame[binIdx] * maskValue
+                    for binIdx in 0..<numBins {
+                        realFrame[binIdx] = channelReal[binIdx][frameIdx]
+                        imagFrame[binIdx] = channelImag[binIdx][frameIdx]
                     }
 
-                    maskedReal.append(newRealFrame)
-                    maskedImag.append(newImagFrame)
+                    realTransposed.append(realFrame)
+                    imagTransposed.append(imagFrame)
                 }
 
-                // 5. Run iSTFT to get time-domain audio for this stem channel
-                let stemAudio = try fft.istft(real: maskedReal, imag: maskedImag)
-                channelOutputs.append(stemAudio)
+                // 5. Run iSTFT on frequency branch output
+                let freqAudio = try fft.istft(real: realTransposed, imag: imagTransposed, length: originalLength)
+
+                // 6. CRITICAL: Sum frequency and time branches
+                // This is the core of the hybrid model: output = time + istft(freq)
+                let timeAudio = stemTimeAudio[channelIdx]
+                var combinedAudio = [Float](repeating: 0, count: originalLength)
+
+                let minLength = min(freqAudio.count, timeAudio.count, originalLength)
+                for i in 0..<minLength {
+                    combinedAudio[i] = freqAudio[i] + timeAudio[i]
+                }
+
+                channelOutputs.append(combinedAudio)
             }
 
             stemOutputs.append(channelOutputs)
@@ -324,6 +364,40 @@ public class SeparationPipeline: @unchecked Sendable {
         }
 
         return transposed
+    }
+
+    /// Pad stereo audio to target segment length using reflect mode
+    /// - Parameters:
+    ///   - left: Left channel samples
+    ///   - right: Right channel samples
+    ///   - targetLength: Target segment length in samples
+    /// - Returns: Padded (left, right) channels
+    private func padAudioToSegment(
+        left: [Float],
+        right: [Float],
+        targetLength: Int
+    ) -> (left: [Float], right: [Float]) {
+        guard left.count < targetLength else {
+            return (Array(left.prefix(targetLength)), Array(right.prefix(targetLength)))
+        }
+
+        let padNeeded = targetLength - left.count
+
+        // Reflect padding (NumPy-compatible: doesn't include edge)
+        func reflectPad(_ audio: [Float], _ padAmount: Int) -> [Float] {
+            var result = audio
+            let n = audio.count
+            for i in 0..<padAmount {
+                // NumPy reflect mode: starts at n-2, wraps around interior
+                let period = max(1, n - 1)
+                let reflectIdx = n - 2 - (i % period)
+                let safeIdx = max(0, min(reflectIdx, n - 1))
+                result.append(audio[safeIdx])
+            }
+            return result
+        }
+
+        return (reflectPad(left, padNeeded), reflectPad(right, padNeeded))
     }
 }
 
