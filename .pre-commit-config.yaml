@@ -1,0 +1,31 @@
+# Pre-commit hooks for HTDemucs CoreML
+# Install: pip install pre-commit && pre-commit install
+
+repos:
+  # Swift formatting
+  - repo: https://github.com/nicklockwood/SwiftFormat
+    rev: 0.54.6
+    hooks:
+      - id: swiftformat
+        args: [--config, .swiftformat]
+
+  # Python linting and formatting
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.9.4
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  # General hygiene
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: '\.md$'
+      - id: end-of-file-fixer
+        exclude: '\.md$'
+      - id: check-yaml
+      - id: check-added-large-files
+        args: ['--maxkb=500']
+      - id: check-merge-conflict
