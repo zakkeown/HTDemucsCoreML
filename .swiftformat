@@ -1,0 +1,25 @@
+# SwiftFormat configuration for HTDemucs CoreML
+
+# File options
+--swiftversion 6.0
+--exclude .build,Resources
+
+# Format options
+--indent 4
+--indentcase false
+--trimwhitespace always
+--linebreaks lf
+--maxwidth 120
+
+# Rules
+--enable blankLinesBetweenScopes
+--enable consecutiveBlankLines
+--enable duplicateImports
+--enable redundantSelf
+--enable sortImports
+--enable trailingCommas
+--enable wrapArguments
+
+# Disable rules that conflict with project style
+--disable acronyms
+--disable wrapMultilineStatementBraces
