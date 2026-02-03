@@ -1,0 +1,208 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel in-progress runs for the same branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ============================================================================
+  # Lint job - Fast feedback on code quality
+  # ============================================================================
+  lint:
+    name: Lint
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SwiftFormat
+        run: brew install swiftformat
+
+      - name: Check Swift formatting
+        run: swiftformat --lint Sources tests --config .swiftformat
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Ruff
+        run: pip install ruff
+
+      - name: Check Python formatting
+        run: |
+          ruff format --check .
+          ruff check .
+
+  # ============================================================================
+  # Build and test Swift package
+  # ============================================================================
+  build-test:
+    name: Build & Test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache SPM dependencies
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: ${{ runner.os }}-spm-${{ hashFiles('Package.resolved') }}
+          restore-keys: |
+            ${{ runner.os }}-spm-
+
+      - name: Build
+        run: swift build -c release
+
+      - name: Run Swift tests
+        run: swift test
+
+  # ============================================================================
+  # Python parity tests
+  # ============================================================================
+  parity:
+    name: Parity Tests
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache Python dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('tests/parity/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install Python dependencies
+        run: pip install -r tests/parity/requirements.txt
+
+      - name: Cache SPM dependencies
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: ${{ runner.os }}-spm-${{ hashFiles('Package.resolved') }}
+          restore-keys: |
+            ${{ runner.os }}-spm-
+
+      - name: Build Swift CLI
+        run: swift build -c release --product htdemucs-cli
+
+      - name: Generate test fixtures
+        run: python tests/parity/fixtures/generate_fixtures.py
+
+      - name: Run parity tests
+        run: |
+          cd tests/parity
+          pytest test_parity.py -v --tb=short
+
+      - name: Generate parity report
+        if: always()
+        run: |
+          cd tests/parity
+          python generate_report.py || true
+
+      - name: Upload parity results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-results
+          path: tests/parity/outputs/
+
+  # ============================================================================
+  # Benchmarks (main branch only)
+  # ============================================================================
+  benchmark:
+    name: Benchmark
+    runs-on: macos-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: [build-test, parity]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache Python dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-benchmark-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          pip install torch torchaudio demucs coremltools numpy soundfile
+
+      - name: Run benchmarks
+        run: python benchmarks/run_benchmark.py --runs 2 --update-baseline
+
+      - name: Check for regressions
+        run: python benchmarks/compare.py
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: benchmarks/latest.json
+
+      - name: Commit baseline update
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "ci: update benchmark baseline [skip ci]"
+          file_pattern: benchmarks/baseline.json
+
+  # ============================================================================
+  # Deploy reports to GitHub Pages (main branch only)
+  # ============================================================================
+  deploy-pages:
+    name: Deploy Pages
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: [parity]
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download parity results
+        uses: actions/download-artifact@v4
+        with:
+          name: parity-results
+          path: _site
+
+      - name: Create index redirect
+        run: |
+          if [ -f _site/parity_report.html ]; then
+            cp _site/parity_report.html _site/index.html
+          fi
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
