@@ -1,6 +1,8 @@
-.PHONY: build build-cli clean test test-parity test-all lint format format-fix setup setup-hooks benchmark benchmark-compare parity-report help
+.PHONY: build build-cli clean test test-parity test-all lint lint-swift lint-python format format-fix format-fix-swift format-fix-python setup setup-swift setup-python setup-hooks benchmark benchmark-compare parity-report help
 
 # Default target
+.DEFAULT_GOAL := help
+
 help:
 	@echo "HTDemucs CoreML - Development Commands"
 	@echo ""
@@ -49,7 +51,7 @@ test:
 	swift test
 
 test-parity: $(PARITY_VENV)
-	cd tests/parity && $(PARITY_PYTEST) test_parity.py -v
+	$(PARITY_PYTEST) tests/parity/test_parity.py -v
 
 test-all: test test-parity
 
@@ -125,4 +127,4 @@ benchmark-compare: $(PARITY_VENV)
 	$(PARITY_PYTHON) benchmarks/compare.py
 
 parity-report: $(PARITY_VENV)
-	cd tests/parity && $(PARITY_PYTHON) generate_report.py
+	$(PARITY_PYTHON) tests/parity/generate_report.py
