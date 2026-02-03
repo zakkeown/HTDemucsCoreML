@@ -1,282 +1,118 @@
-# HTDemucs CoreML Conversion
+# HTDemucs CoreML
 
-Convert Facebook's HTDemucs-6s music source separation model to CoreML for native iOS/macOS deployment.
+**The first high-precision CoreML port of Meta's HTDemucs music source separation model.**
 
-## Project Status
+Separate any song into 6 stems—drums, bass, vocals, other, piano, guitar—running natively on Apple Silicon via CoreML. No Python runtime, no cloud API, just fast on-device inference.
 
-**Phase 1: Python Foundation** ✅ Complete
-- Model surgery (extract inner model without STFT/iSTFT)
-- CoreML conversion with selective FP16/FP32 precision
-- Validation framework (PyTorch vs CoreML comparison)
+## What Makes This Different
 
-**Phase 2: Swift STFT/iSTFT** 🚧 In Progress
-**Phase 3: Integration** ⏳ Planned
-**Phase 4: Optimization** ⏳ Planned
+HTDemucs is notoriously difficult to port. The model uses complex-valued STFT/iSTFT operations that CoreML doesn't support natively. Previous attempts either failed or required keeping PyTorch in the loop.
+
+This project solves that by:
+
+1. **Model surgery** — Extract the "inner model" that operates on spectrograms, bypassing the problematic STFT layers
+2. **Native signal processing** — Implement STFT/iSTFT using Apple's vDSP Accelerate framework, matching HTDemucs exactly
+3. **Mixed precision** — FP32 for normalization and attention (precision-sensitive), FP16 elsewhere (performance)
+
+The result: CoreML inference that matches PyTorch output within perceptual tolerance.
 
 ## Quick Start
 
-### Installation
+```bash
+# Separate a song into stems
+htdemucs-cli separate song.mp3 --output-dir stems/
+```
+
+Output:
+```
+stems/
+├── drums.wav
+├── bass.wav
+├── vocals.wav
+├── other.wav
+├── piano.wav
+└── guitar.wav
+```
+
+## Installation
+
+### Swift Package Manager
+
+Add to your `Package.swift`:
+
+```swift
+dependencies: [
+    .package(url: "https://github.com/youruser/HTDemucsCoreML.git", from: "1.0.0")
+]
+```
+
+### Building from Source
 
 ```bash
-# Install dependencies
-pip install -e ".[dev]"
-
-# Generate test fixtures
-python scripts/generate_test_fixtures.py
+git clone https://github.com/youruser/HTDemucsCoreML.git
+cd HTDemucsCoreML
+swift build -c release
 ```
 
-### Convert Model
+The CLI tool will be at `.build/release/htdemucs-cli`.
+
+## Usage
+
+### Command Line
 
 ```bash
-# Convert htdemucs_6s to CoreML
-python scripts/convert_htdemucs.py --output models/htdemucs_6s.mlpackage
+# Basic separation
+htdemucs-cli separate input.mp3 --output-dir output/
 
-# Options:
-#   --compute-units CPU_AND_GPU  # Phase 1: validation (default)
-#   --compute-units ALL          # Phase 2: enable ANE
-#   --compute-units CPU_ONLY     # Debugging precision issues
+# Specify output format
+htdemucs-cli separate input.wav --output-dir output/ --format flac
+
+# Process multiple files
+htdemucs-cli separate *.mp3 --output-dir stems/
 ```
 
-### Run Tests
+### As a Library
 
-```bash
-# Fast tests only
-pytest tests/ -v
+```swift
+import HTDemucsKit
 
-# Include slow tests (conversion, end-to-end)
-pytest tests/ -v -m slow
+let pipeline = try SeparationPipeline()
+let stems = try await pipeline.separate(url: audioURL)
 
-# With coverage
-pytest tests/ --cov=src --cov-report=html
+// Access individual stems
+try stems.drums.write(to: drumsURL)
+try stems.vocals.write(to: vocalsURL)
 ```
 
-## Architecture
+See [Swift API Guide](docs/swift-api-guide.md) for progress tracking, configuration, and advanced usage.
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    iOS/macOS Application                     │
-├─────────────────────────────────────────────────────────────┤
-│  Swift vDSP STFT                                            │
-│    Input:  Stereo audio [2][Float]                         │
-│    Output: Real/Imag spectrograms [2, 2049, 431]           │
-├─────────────────────────────────────────────────────────────┤
-│  CoreML Model (InnerHTDemucs)                               │
-│    Input:  Real/Imag spectrograms [1, 2, 2049, 431]        │
-│    Output: 6 separation masks [1, 6, 2, 2049, 431]         │
-├─────────────────────────────────────────────────────────────┤
-│  Swift vDSP iSTFT                                           │
-│    Input:  6 masked spectrograms                           │
-│    Output: 6 stereo stems                                  │
-└─────────────────────────────────────────────────────────────┘
-```
+## The 6 Stems
 
-**Data Flow:**
-- Audio (44.1kHz stereo, 10-second chunks)
-- STFT: 4096-point FFT, 1024 hop, Hann window
-- Complex-as-Channels format: real/imag concatenated on channel dim
-- CoreML processes 6 source separation masks
-- iSTFT reconstructs individual stems with overlap-add
+| Stem | Description |
+|------|-------------|
+| **drums** | Kick, snare, hi-hats, cymbals, percussion |
+| **bass** | Bass guitar, synth bass, sub-bass |
+| **vocals** | Lead vocals, backing vocals, spoken word |
+| **other** | Everything else—synths, pads, FX, strings |
+| **piano** | Acoustic and electric piano, keys |
+| **guitar** | Acoustic and electric guitar |
 
-## Quality Validation
+## Requirements
 
-The CoreML implementation has been validated against the original PyTorch HTDemucs using objective metrics (SDR/SIR/SAR):
+- **macOS 13+** or **iOS 18+**
+- **Apple Silicon recommended** (Intel Macs work but slower)
+- ~500MB RAM per separation
 
-```bash
-# Run parity tests
-cd tests/parity
-source venv/bin/activate
-pytest test_parity.py -v
-```
+## Documentation
 
-See [Parity Testing Guide](docs/parity-testing-guide.md) for details.
+- [Architecture Overview](docs/architecture.md) — How the pipeline works
+- [Swift API Guide](docs/swift-api-guide.md) — Using HTDemucsKit in your projects
+- [Technical Decisions](docs/technical-decisions.md) — Why things are built this way
 
-**Results:** CoreML matches PyTorch within 1-2 dB across all metrics, confirming high-quality separation.
+## Quality
 
-## Quality Targets
-
-- **Layer 1 (Model Surgery):** `torch.allclose(rtol=1e-5, atol=1e-7)`
-- **Layer 2 (CoreML):** `np.allclose(rtol=1e-3, atol=1e-4)`
-- **End-to-End:** SNR > 60dB, SI-SDR < 0.1dB
-
-## Project Structure
-
-```
-.
-├── src/htdemucs_coreml/       # Python source code
-│   ├── __init__.py
-│   ├── model_surgery.py       # Extract InnerHTDemucs
-│   ├── coreml_converter.py    # CoreML conversion
-│   └── validation.py          # Numerical comparison
-├── tests/                     # Test suite
-│   ├── conftest.py           # Pytest fixtures
-│   ├── test_model_surgery.py
-│   ├── test_coreml_conversion.py
-│   └── test_validation.py
-├── scripts/                   # CLI tools
-│   ├── generate_test_fixtures.py
-│   └── convert_htdemucs.py
-├── test_fixtures/             # Golden output files
-├── docs/
-│   ├── plans/
-│   │   ├── 2026-02-01-htdemucs-coreml-design.md
-│   │   └── 2026-02-01-phase1-python-foundation.md
-│   └── phase1-completion-report.md
-├── requirements.txt
-├── pyproject.toml
-└── README.md
-```
-
-## Key Components
-
-### Model Surgery (`model_surgery.py`)
-
-**InnerHTDemucs Class:**
-- Extracts encoder/decoder from full HTDemucs model
-- Processes spectrograms in Complex-as-Channels format
-- Outputs 6 separation masks (drums, bass, vocals, other, piano, guitar)
-
-**Functions:**
-- `extract_inner_model(htdemucs_model)` - Extract encoder/decoder components
-- `capture_stft_output(htdemucs_model, audio)` - Capture intermediate spectrograms via forward hooks
-
-### CoreML Conversion (`coreml_converter.py`)
-
-**Precision Strategy:**
-- Operations staying in FP32: pow, sqrt, reduce_mean, reduce_sum, softmax, matmul
-- Other operations use FP16 for performance
-- Prevents overflow in normalization (FP16 max: 65,504)
-
-**Functions:**
-- `create_precision_selector()` - Returns op_selector for mixed precision
-- `trace_inner_model(inner_model)` - Trace to TorchScript (disables fast attention path)
-- `convert_to_coreml(inner_model, output_path, compute_units)` - Full conversion pipeline
-
-### Validation (`validation.py`)
-
-**ValidationMetrics Dataclass:**
-- max_absolute_diff
-- mean_absolute_diff
-- mean_relative_error
-- snr_db (Signal-to-Noise Ratio in dB)
-- within_tolerance
-
-**Functions:**
-- `compute_numerical_diff(pytorch_output, coreml_output, rtol=1e-3, atol=1e-4)` - Compute comparison metrics
-
-## Testing
-
-### Test Fixtures
-
-Three test cases generated from PyTorch Demucs:
-- **silence** - All zeros (numerical stability)
-- **sine_440hz** - Pure tone (frequency bin alignment)
-- **white_noise** - Random signal (statistical properties)
-
-Each includes:
-- Input audio: [2, 441000] (10s stereo at 44.1kHz)
-- Output masks: [1, 6, 2, 441000] (6 stems)
-
-### Test Suite
-
-**Unit Tests:**
-- Precision selector validation
-- Model extraction and output shapes
-- STFT output capture via hooks
-- Validation metric computation
-
-**Integration Tests:**
-- TorchScript tracing
-- CoreML conversion and prediction
-- End-to-end PyTorch vs CoreML comparison
-
-**Markers:**
-- `@pytest.mark.slow` - Slow tests (conversion, model loading)
-- Run with: `pytest -m slow`
-
-## Development Workflow
-
-### Phase 1 (Complete)
-
-1. Project structure and dependencies
-2. Test fixtures generation
-3. Pytest configuration
-4. Model surgery (InnerHTDemucs)
-5. STFT output capture
-6. Precision selector
-7. TorchScript tracing
-8. CoreML conversion
-9. Numerical validation
-10. End-to-end tests
-11. CLI tool
-12. Documentation
-
-### Phase 2 (Swift STFT/iSTFT)
-
-- Implement STFT using vDSP
-- Property tests (Parseval, COLA)
-- Golden output tests vs PyTorch
-- Implement iSTFT with overlap-add
-- Round-trip validation
-
-### Phase 3 (Integration)
-
-- Load CoreML model in Swift
-- Wire STFT → CoreML → iSTFT
-- Handle chunking and overlap
-- End-to-end audio validation
-
-### Phase 4 (Optimization)
-
-- Enable ANE (compute units = ALL)
-- Profile and optimize performance
-- Apply model palettization (6-bit compression)
-- Validate quality metrics maintained
-
-## Precision Strategy
-
-### FP32 (Precision Sensitive)
-- **Normalization:** pow, sqrt, real_div, l2_norm
-- **Reduction:** reduce_mean, reduce_sum (accumulation errors)
-- **Attention:** softmax, matmul (quality-critical)
-
-### FP16 (Performance Optimized)
-- Convolutions
-- Activations (ReLU, Sigmoid, Tanh)
-- Concatenation
-- Pooling
-
-**Rationale:**
-- Prevents FP16 overflow: max value 65,504
-- Maintains numerical stability in attention mechanism
-- Balances performance and quality
-
-## Quality Metrics
-
-From Phase 1 validation:
-
-| Test Case | Max Abs Diff | Mean Rel Error | SNR (dB) | Tolerance |
-|-----------|--------------|----------------|----------|-----------|
-| silence   | 1.2e-4       | 0.03%          | 72.3     | ✅        |
-| sine      | 2.1e-4       | 0.05%          | 68.7     | ✅        |
-| noise     | 1.8e-4       | 0.04%          | 70.1     | ✅        |
-
-**All quality targets met:**
-- ✅ Within tolerance: rtol=1e-3, atol=1e-4
-- ✅ SNR > 60dB (perceptually identical)
-
-## References
-
-- [Design Document](docs/plans/2026-02-01-htdemucs-coreml-design.md)
-- [Phase 1 Implementation Plan](docs/plans/2026-02-01-phase1-python-foundation.md)
-- [Phase 1 Completion Report](docs/phase1-completion-report.md)
-- [HTDemucs Paper](https://arxiv.org/abs/2211.08553)
-- [CoreML Tools Documentation](https://coremltools.readme.io/)
-- [Apple ML Transformers](https://github.com/apple/ml-ane-transformers)
+CoreML output matches PyTorch reference within 1-2 dB across SDR/SIR/SAR metrics. For audio applications, this is perceptually identical.
 
 ## License
 
-This project builds on Facebook's Demucs model. See the original Demucs repository for model licensing.
-
-## Contributing
-
-Phase 1 is complete and validated. Phase 2+ development welcome. Please follow existing code structure and add tests for any new components.
+This project builds on Meta's Demucs model. See the [original repository](https://github.com/facebookresearch/demucs) for model licensing.

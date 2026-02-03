@@ -1,14 +1,55 @@
 import CoreML
 import Foundation
 
-/// Runs CoreML inference on audio spectrograms and raw audio (hybrid model)
+/// Runs CoreML inference on audio spectrograms and raw audio using the hybrid HTDemucs model.
+///
+/// ## Hybrid Model Architecture
+/// HTDemucs is a hybrid model with two branches:
+/// - **Frequency branch**: Processes spectrograms through encoder/transformer/decoder
+/// - **Time branch**: Processes raw audio through a parallel network
+///
+/// The final output combines both: `stem = time_output + istft(freq_output)`
+///
+/// ## Input Tensor Shapes
+/// The model accepts two inputs:
+/// - `spectrogram`: `[1, 4, 2048, 336]` - batch, channels, freq bins, time frames
+///   - Channels are Complex-as-Channels: `[L_real, L_imag, R_real, R_imag]`
+/// - `raw_audio`: `[1, 2, 343980]` - batch, channels, samples
+///   - Stereo audio at 44.1 kHz for ~7.8 seconds
+///
+/// ## Output Tensor Shapes
+/// The model returns two outputs:
+/// - `add_66` (freq output): `[1, 6, 4, 2048, 336]` - batch, stems, channels, freq, time
+/// - `add_67` (time output): `[1, 6, 2, 343980]` - batch, stems, channels, samples
+///
+/// ## Stem Ordering (CRITICAL)
+/// The model outputs stems in this order (must match PyTorch exactly):
+/// ```
+/// Index 0: drums
+/// Index 1: bass
+/// Index 2: other   <-- NOT vocals!
+/// Index 3: vocals  <-- NOT other!
+/// Index 4: guitar
+/// Index 5: piano
+/// ```
+/// Getting this wrong will swap vocals and "other" instruments.
 public class InferenceEngine {
     private let model: MLModel
 
-    /// Model configuration constants
-    private let modelTimeFrames = 336  // Fixed time frames for 7.8s segment
-    private let modelAudioSamples = 343980  // Fixed audio samples for 7.8s at 44.1kHz
+    // MARK: - Model Configuration Constants
+    // These must match the CoreML model's fixed input dimensions.
+    // The model was converted with these specific sizes for the training segment.
+
+    /// Fixed time frames in spectrogram input (336 frames for 7.8s segment)
+    private let modelTimeFrames = 336
+
+    /// Fixed audio samples in raw audio input (343,980 samples = 7.8s at 44.1kHz)
+    private let modelAudioSamples = 343980
+
+    /// Frequency bins in spectrogram (2048, excluding Nyquist)
     private let freqBins = 2048
+
+    /// Number of separation stems (drums, bass, other, vocals, guitar, piano)
     private let numStems = 6
 
     /// Initialize with loaded CoreML model
@@ -189,12 +230,30 @@ public class InferenceEngine {
 
     // MARK: - Private Helpers
 
-    /// Create combined MLMultiArray with interleaved real/imag channels
+    /// Create combined MLMultiArray with Complex-as-Channels format.
+    ///
+    /// ## Memory Layout
+    /// CoreML expects row-major (C-style) memory layout. For shape `[1, 4, F, T]`:
+    /// - Outermost dimension (batch) varies slowest
+    /// - Innermost dimension (time) varies fastest
+    ///
+    /// ## Channel Ordering
+    /// The 4 channels encode stereo complex spectrogram as real-valued tensor:
+    /// ```
+    /// Channel 0: Left real      (L_re)
+    /// Channel 1: Left imaginary (L_im)
+    /// Channel 2: Right real     (R_re)
+    /// Channel 3: Right imaginary (R_im)
+    /// ```
+    ///
+    /// This "Complex-as-Channels" format allows CoreML to process spectrograms
+    /// without native complex number support.
+    ///
     /// - Parameters:
-    ///   - real: Real component [2 channels][2049 bins][timeFrames]
-    ///   - imag: Imaginary component [2 channels][2049 bins][timeFrames]
-    ///   - shape: Target shape [1, 4, 2049, timeFrames]
-    /// - Returns: MLMultiArray with real/imag interleaved
+    ///   - real: Real component `[2 channels][freq bins][time frames]`
+    ///   - imag: Imaginary component `[2 channels][freq bins][time frames]`
+    ///   - shape: Target MLMultiArray shape `[1, 4, freq, time]`
+    /// - Returns: MLMultiArray ready for CoreML inference
     private func createCombinedMLMultiArray(
         real: [[[Float]]],
         imag: [[[Float]]],
@@ -202,11 +261,11 @@ public class InferenceEngine {
     ) throws -> MLMultiArray {
         let array = try MLMultiArray(shape: shape.map { NSNumber(value: $0) }, dataType: .float32)
 
-        // Fill array in row-major order: [batch=1][4 channels][2049 bins][timeFrames]
-        // Channels are: [real_left, imag_left, real_right, imag_right]
+        // Fill array in row-major order: [batch=1][4 channels][freq bins][time frames]
+        // Index increments: time (fastest) -> freq -> channel -> batch (slowest)
         var index = 0
 
-        // Channel 0: real_left
+        // Channel 0: Left channel real component
         for freq in 0..<shape[2] {
             for time in 0..<shape[3] {
                 array[index] = NSNumber(value: real[0][freq][time])
@@ -214,7 +273,7 @@ public class InferenceEngine {
             }
         }
 
-        // Channel 1: imag_left
+        // Channel 1: Left channel imaginary component
         for freq in 0..<shape[2] {
             for time in 0..<shape[3] {
                 array[index] = NSNumber(value: imag[0][freq][time])
@@ -222,7 +281,7 @@ public class InferenceEngine {
             }
         }
 
-        // Channel 2: real_right
+        // Channel 2: Right channel real component
         for freq in 0..<shape[2] {
             for time in 0..<shape[3] {
                 array[index] = NSNumber(value: real[1][freq][time])
@@ -230,7 +289,7 @@ public class InferenceEngine {
             }
         }
 
-        // Channel 3: imag_right
+        // Channel 3: Right channel imaginary component
         for freq in 0..<shape[2] {
             for time in 0..<shape[3] {
                 array[index] = NSNumber(value: imag[1][freq][time])
@@ -308,8 +367,25 @@ public class InferenceEngine {
         return (resultReal, resultImag)
     }
 
-    /// Pad or trim spectrogram to target number of frames
-    /// Uses REFLECT padding to preserve statistics (not zero padding!)
+    /// Pad or trim spectrogram to match model's expected time frame count.
+    ///
+    /// ## Why Reflect Padding (Not Zero Padding)?
+    /// The model normalizes input by computing mean and std across the spectrogram.
+    /// Zero padding would skew these statistics, causing incorrect normalization.
+    /// Reflect padding preserves the statistical properties of the signal.
+    ///
+    /// ## Reflect Padding Algorithm
+    /// For a sequence `[a, b, c, d, e]` that needs 3 more elements:
+    /// - Mirror from the end: `[d, c, b]`
+    /// - Result: `[a, b, c, d, e, d, c, b]`
+    ///
+    /// This is equivalent to NumPy's `np.pad(x, pad_width, mode='reflect')`.
+    ///
+    /// - Parameters:
+    ///   - real: Real component spectrogram
+    ///   - imag: Imaginary component spectrogram
+    ///   - targetFrames: Model's expected number of time frames
+    /// - Returns: Padded or trimmed spectrograms matching target size
     private func padOrTrimSpectrogram(
         real: [[[Float]]],
         imag: [[[Float]]],
